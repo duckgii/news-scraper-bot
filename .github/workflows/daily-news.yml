@@ -4,7 +4,7 @@ on:
   schedule:
     # GitHub Actions는 UTC 기준. 08:00 KST = 전날 23:00 UTC
     - cron: "0 23 * * *"
-  workflow_dispatch: {}  # 수동 실행 버튼
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -18,7 +18,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      # 로그 타임스탬프를 KST로 보기 좋게
       TZ: Asia/Seoul
       NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
       NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
@@ -36,7 +35,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install system deps (optional but helpful for lxml/newspaper3k)
+      - name: Install system deps (for lxml/newspaper3k)
         run: |
           sudo apt-get update
           sudo apt-get install -y libxml2-dev libxslt1-dev zlib1g-dev
@@ -44,14 +43,16 @@ jobs:
       - name: Install Python deps
         run: pip install -r requirements.txt
 
+      # 🔧 여기 수정: 멀티라인 스크립트는 run: | 로 감싼다
       - name: (Optional) Download NLTK data for newspaper3k
-        run: python - << 'PY'
-import nltk
-try:
-    nltk.download('punkt', quiet=True)
-except Exception as e:
-    print("NLTK download warning:", e)
-PY
+        run: |
+          python - << 'PY'
+          import nltk
+          try:
+              nltk.download('punkt', quiet=True)
+          except Exception as e:
+              print("NLTK download warning:", e)
+          PY
 
       - name: Run pipeline (collect + summarize + invest brief)
         run: python econ_popular_multi.py
