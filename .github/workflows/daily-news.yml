@@ -8,7 +8,7 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    environment: "전체 환경변수"   # 또는 영기님이 만든 Environment 이름 (예: "프로덕션", "테스트" 등)
     env:
       TZ: Asia/Seoul
       NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
@@ -16,6 +16,7 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
       NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
