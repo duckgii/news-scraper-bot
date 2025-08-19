@@ -1,0 +1,69 @@
+name: Daily Econ News (KST 08:00)
+
+on:
+  schedule:
+    # GitHub Actions는 UTC 기준. 08:00 KST = 전날 23:00 UTC
+    - cron: "0 23 * * *"
+  workflow_dispatch: {}  # 수동 실행 버튼
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-econ-news
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # 로그 타임스탬프를 KST로 보기 좋게
+      TZ: Asia/Seoul
+      NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+      NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+      NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install system deps (optional but helpful for lxml/newspaper3k)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxml2-dev libxslt1-dev zlib1g-dev
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: (Optional) Download NLTK data for newspaper3k
+        run: python - << 'PY'
+import nltk
+try:
+    nltk.download('punkt', quiet=True)
+except Exception as e:
+    print("NLTK download warning:", e)
+PY
+
+      - name: Run pipeline (collect + summarize + invest brief)
+        run: python econ_popular_multi.py
+
+      - name: Push to Notion (create daily page)
+        run: python push_notion_daily.py
+
+      - name: Upload artifacts (for debugging/result)
+        uses: actions/upload-artifact@v4
+        with:
+          name: econ-popular-output
+          path: |
+            econ_popular_multi.json
+            daily.log
+          if-no-files-found: ignore
