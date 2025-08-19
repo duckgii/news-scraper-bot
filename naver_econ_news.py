@@ -1,4 +1,4 @@
-import os, re, json, time, requests
+import os, re, json, time, requests, math
 from dotenv import load_dotenv
 from urllib.parse import urlparse, parse_qs, urlunparse
 from email.utils import parsedate_to_datetime
@@ -8,15 +8,23 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.cluster import DBSCAN
 from rapidfuzz import fuzz
 
+# GPT
+from openai import OpenAI
+from newspaper import Article
+
 # ── 환경
 load_dotenv()
 NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID")
 NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET")
-assert NAVER_CLIENT_ID and NAVER_CLIENT_SECRET, "환경변수 NAVER_CLIENT_ID/SECRET 필요(.env)"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+assert NAVER_CLIENT_ID and NAVER_CLIENT_SECRET, "환경변수 NAVER_CLIENT_ID/SECRET 필요(.env)"
+assert OPENAI_API_KEY, "환경변수 OPENAI_API_KEY 필요(.env)"
+
+client = OpenAI(api_key=OPENAI_API_KEY)
 KST = timezone(timedelta(hours=9))
 
-# ── 키워드 세트: '경제' + 세부 토픽들 (원하면 더 넣고 빼세요)
+# ── 키워드 세트 (여러 키워드로 수집 → 통합)
 KEYWORDS = [
     "경제", "금리", "물가", "환율", "무역", "수출", "수입",
     "GDP", "성장률", "경기", "기준금리", "연준", "한국은행",
@@ -78,7 +86,7 @@ def norm_title(s: str) -> str:
     return s
 
 # ── API 호출 (키워드별 + 페이지네이션)
-def fetch_news_for_keyword(keyword, per_page=100, max_pages=2, sleep_sec=0.2):
+def fetch_news_for_keyword(keyword, per_page=50, max_pages=2, sleep_sec=0.2):
     headers = {"X-Naver-Client-Id": NAVER_CLIENT_ID, "X-Naver-Client-Secret": NAVER_CLIENT_SECRET}
     base = "https://openapi.naver.com/v1/search/news.json"
     collected = []
@@ -90,10 +98,10 @@ def fetch_news_for_keyword(keyword, per_page=100, max_pages=2, sleep_sec=0.2):
         items = r.json().get("items", [])
         if not items: break
         collected.extend(items)
-        time.sleep(sleep_sec)     # 쿼터/레이트 한도 보호
+        time.sleep(sleep_sec)     # 쿼터 보호
     return collected
 
-def fetch_all_keywords(keywords, per_page=100, max_pages=2):
+def fetch_all_keywords(keywords, per_page=50, max_pages=2):
     all_items = []
     for kw in keywords:
         try:
@@ -102,7 +110,7 @@ def fetch_all_keywords(keywords, per_page=100, max_pages=2):
             print(f"[WARN] '{kw}' 요청 실패: {e}")
     return all_items
 
-# ── 필터링(‘오늘’ + 제외어), 그리고 정규화/기본 중복 제거
+# ── 필터링(‘오늘’ + 제외어), 그리고 URL 정규화/기본 중복 제거
 def filter_and_normalize(raw_items):
     out = []
     seen_urls = set()
@@ -180,6 +188,7 @@ def cluster_by_title(items, eps=0.65, min_samples=2):
             "rep_url": rep["url"],
             "rep_source": rep["source"],
             "latest_pubDate": rep["pubDate"],
+            "members": members_sorted,  # 요약시 참고 가능
         })
     groups.sort(key=lambda g:(g["size"], g["latest_pubDate"]), reverse=True)
     return groups
@@ -217,37 +226,136 @@ def top_n_with_diversity(groups, items, n=10, sim_threshold=93):
                 break
     return picked[:n]
 
+# ── 본문 추출
+def extract_article_text(url):
+    try:
+        art = Article(url, language="ko")
+        art.download()
+        art.parse()
+        text = (art.text or "").strip()
+        # newspaper가 짧게 주면 대비
+        return text
+    except Exception as e:
+        print(f"[WARN] 본문 추출 실패: {url} ({e})")
+        return ""
+
+# ── GPT 요약 (짧은 제목 + 5문장), 긴 본문은 map→reduce 방식
+def gpt_summarize(text, url, chunk_chars=2500):
+    if not text.strip():
+        return {"short_title": "본문 추출 실패", "summary": "본문 없음"}
+
+    # 1) 긴 본문 쪼개기
+    chunks = []
+    t = text
+    while t:
+        chunks.append(t[:chunk_chars])
+        t = t[chunk_chars:]
+
+    # 2) chunk별 2~3문장 요약
+    partial_summaries = []
+    for i, ch in enumerate(chunks):
+        prompt = f"""아래 기사 일부를 2~3문장으로 요약해줘.
+- 과장 금지, 사실 위주
+- 수치/기관명/날짜 보존
+
+부분 {i+1}/{len(chunks)}:
+{ch}"""
+        try:
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role":"system","content":"너는 한국어 경제 기사 요약가야."},
+                    {"role":"user","content":prompt}
+                ],
+                temperature=0.2,
+            )
+            partial_summaries.append(resp.choices[0].message.content.strip())
+        except Exception as e:
+            print(f"[WARN] 부분 요약 실패: {e}")
+            partial_summaries.append("")
+
+    # 3) 합성 요약(최종): 짧은 제목 + 정확히 5문장
+    merge_input = "\n\n".join(ps for ps in partial_summaries if ps)
+    if not merge_input:
+        merge_input = text[:2000]
+
+    final_prompt = f"""아래 내용을 바탕으로 기사를 최종 요약해줘.
+형식:
+1) 맨 첫 줄: 아주 짧은 제목(한 줄)
+2) 그 다음: 한국어로 정확히 5문장 요약
+
+출처 URL: {url}
+요약 재료:
+{merge_input}"""
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role":"system","content":"너는 한국어 경제 기사 요약가야."},
+                {"role":"user","content":final_prompt}
+            ],
+            temperature=0.2,
+        )
+        content = resp.choices[0].message.content.strip()
+        lines = [ln for ln in content.split("\n") if ln.strip()]
+        if not lines:
+            return {"short_title": "요약 실패", "summary": ""}
+        short_title = lines[0].strip()
+        summary = "\n".join(lines[1:]).strip()
+        return {"short_title": short_title, "summary": summary}
+    except Exception as e:
+        print(f"[WARN] 최종 요약 실패: {e}")
+        return {"short_title": "요약 실패", "summary": ""}
+
 # ── 메인
 if __name__ == "__main__":
     TARGET = 10
 
-    # 1) 키워드 다발로 수집 (키워드×페이지네이션)
-    raw = fetch_all_keywords(KEYWORDS, per_page=50, max_pages=2)  # 과금/쿼터 고려해 적당히
+    # 1) 키워드×페이지네이션 수집
+    raw = fetch_all_keywords(KEYWORDS, per_page=50, max_pages=2)
+
     # 2) 오늘 기사 + 제외어 필터 + URL 정규화/중복 제거
     base = filter_and_normalize(raw)
-    # 3) 제목 유사 중복 제거(사전)
+
+    # 3) 제목 유사 사전 dedup
     base = dedup_by_title(base, threshold=93)
-    # 4) 군집화로 인기 추정
+
+    # 4) 군집화로 '인기' 추정
     groups = cluster_by_title(base, eps=0.65, min_samples=2)
+
     # 5) Top10 보장(+유사제목 차단)
     top = top_n_with_diversity(groups, base, n=TARGET, sim_threshold=93)
 
+    # 6) 각 기사 본문 → GPT 요약
+    results = []
+    for i, g in enumerate(top, start=1):
+        url = g["rep_url"]
+        title = g["rep_title"]
+        print(f"[{i}/{TARGET}] 요약 중: {title}")
+        text = extract_article_text(url)
+        summary = gpt_summarize(text, url)
+        results.append({
+            "rank": i,
+            "size": g["size"],
+            "title": title,
+            "url": url,
+            "source": g["rep_source"],
+            "latest_pubDate": g["latest_pubDate"],
+            "short_title": summary["short_title"],
+            "summary": summary["summary"]
+        })
+        # 친절한 레이트 컨트롤(선택)
+        time.sleep(0.2)
+
+    # 7) 저장
     out = {
         "as_of": datetime.now(KST).isoformat(),
         "total_raw": len(raw),
         "total_after_filter": len(base),
         "cluster_count": len(groups),
-        "returned": len(top),
-        "top": [
-            {
-                "rank": i+1,
-                "size": g["size"],
-                "title": g["rep_title"],
-                "url": g["rep_url"],
-                "source": g["rep_source"],
-                "latest_pubDate": g["latest_pubDate"]
-            } for i,g in enumerate(top)
-        ]
+        "returned": len(results),
+        "top": results
     }
     text = json.dumps(out, ensure_ascii=False, indent=2)
     with open("econ_popular_multi.json","w",encoding="utf-8") as f:
