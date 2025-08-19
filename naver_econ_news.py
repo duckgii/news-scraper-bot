@@ -47,6 +47,47 @@ PUNCT = re.compile(r"[^\w가-힣\s]")
 NUMS = re.compile(r"\d{2,}")
 DROP_QS_KEYS = {"utm_source","utm_medium","utm_campaign","utm_term","utm_content","ncid","fbclid","igshid","ref"}
 
+# === (추가) 투자 브리핑 생성 ===
+def build_invest_prompt(articles):
+    """
+    articles: [{'rank', 'size', 'title', 'url', 'source', 'latest_pubDate', 'short_title', 'summary'}...]
+    """
+    bullets = []
+    for a in articles:
+        bullets.append(f"- [{a['rank']}] {a['short_title']}\n  요약: {a['summary']}\n  링크: {a['url']}")
+    joined = "\n".join(bullets)
+
+    prompt = f"""아래는 오늘의 경제 기사 요약 10개다. 내용을 종합해 **일반적 정보 제공용** '오늘의 투자 브리핑'을 작성하라.
+단, 개인 맞춤 투자자문을 하지 말고, 과도한 확신/수익 보장을 금지한다. 구체 종목 추천은 피하고, 섹터/자산군/테마 수준으로 설명하라.
+형식은 아래를 따르라(각 항목은 간결하게, 필요시 bullet로):
+
+[오늘의 핵심 테마 3~5개]
+[기회 요인]
+[리스크 요인]
+[관찰 포인트(경제지표/이벤트/발표)]
+[전략적 시사점(포트폴리오·헤지 관점의 일반적 제안)]
+[면책 문구 1줄: '본 내용은 정보 제공 목적이며 투자판단의 최종 책임은 본인에게 있습니다.']
+
+기사 요약:
+{joined}"""
+    return prompt
+
+def gpt_invest_brief(articles):
+    prompt = build_invest_prompt(articles)
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role":"system","content":"너는 과도한 확신을 피하고 리스크를 명확히 밝히는 투자 브리핑 작성가다."},
+                {"role":"user","content":prompt}
+            ],
+            temperature=0.2,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"[WARN] 투자 브리핑 생성 실패: {e}")
+        return "투자 브리핑 생성 실패(요약 데이터 부족 또는 API 제한)."
+
 def norm_html(text:str)->str:
     return re.sub(r"\s+"," ", TAG_RE.sub(" ", text or "")).strip()
 
@@ -308,6 +349,102 @@ def gpt_summarize(text, url, chunk_chars=2500):
         print(f"[WARN] 최종 요약 실패: {e}")
         return {"short_title": "요약 실패", "summary": ""}
 
+
+# === 투자 브리핑(구조화 JSON) 프롬프트 생성 ===
+def build_invest_prompt_v2(articles):
+    # GPT에 넘길 요약만 간결 JSON으로 정리
+    items = [
+        {
+            "rank": a["rank"],
+            "title": a["short_title"] or a["title"],
+            "summary": a["summary"],
+            "url": a["url"]
+        } for a in articles
+    ]
+    seed = json.dumps(items, ensure_ascii=False)
+
+    # ★ 포맷 강제: 자산군 플레이북 + 이슈 설명서(학습형) + 관찰 포인트
+    return f"""
+너는 '일반 정보 제공용' 매크로 전략 요약가다. 아래 한국어 기사 요약 10개만 근거로 삼아,
+과도한 확신/수익보장/개별종목 추천을 금지하고, 교육적 설명을 곁들인 '투자 브리핑'을 JSON으로 생성하라.
+반드시 'JSON만' 출력하고, 키 이외의 문구/서론은 금지한다.
+
+기사요약목록(JSON):
+{seed}
+
+출력 스키마(JSON):
+{{
+  "themes": ["오늘의 핵심 테마(짧게)"],
+  "issues": [
+    {{
+      "title": "이슈 이름(짧게)",
+      "what_happened": "무슨 일이 있었는가(팩트 요약)",
+      "why_it_matters": "왜 중요한가(경제적 메커니즘 설명)",
+      "transmission": ["전파 경로(금리→환율→수출 등)"],
+      "monitor": ["수치/지표/발표/레벨 등 관찰 포인트"],
+      "scenarios": {{
+        "base": {{ "prob": 0.5, "text": "기본 시나리오 설명" }},
+        "bull": {{ "prob": 0.25, "text": "호조 시나리오" }},
+        "bear": {{ "prob": 0.25, "text": "부진 시나리오" }}
+      }},
+      "actions": ["행동 가이드(일반론: if/then 규칙; 과도한 확신 금지, 손절/헷지 원칙 포함)"]
+    }}
+  ],
+  "playbook": {{
+    "equities": {{
+      "bias": "상승/중립/하락 중 하나(근거 한줄)",
+      "tactical_1_2w": ["1~2주 전술(섹터/요인 위주, 종목 언급 금지)"],
+      "strategic_1_3m": ["1~3개월 전략"],
+      "triggers": ["매수/감축/헤지 트리거(수치/레벨)"],
+      "hedges": ["헤지·분산 아이디어(일반론)"],
+      "invalidations": ["시나리오 무효화 조건"]
+    }},
+    "bonds": {{
+      "bias": "", "tactical_1_2w": [], "strategic_1_3m": [],
+      "triggers": [], "hedges": [], "invalidations": []
+    }},
+    "fx_dollar": {{
+      "bias": "", "tactical_1_2w": [], "strategic_1_3m": [],
+      "triggers": [], "hedges": [], "invalidations": []
+    }},
+    "commodities": {{
+      "oil": {{"bias":"", "notes":["…"]}},
+      "gold": {{"bias":"", "notes":["…"]}},
+      "industrial_metals": {{"bias":"", "notes":["…"]}}
+    }}
+  }},
+  "calendar": ["다가오는 일정/지표(예: FOMC, CPI, 고용 등)"],
+  "disclaimer": "본 내용은 정보 제공 목적이며 투자 판단의 최종 책임은 본인에게 있습니다."
+}}
+주의:
+- 기사요약목록 내 정보로만 추론하라(할루시네이션 금지).
+- 개별 종목/티커, 수익 보장 문장 금지. 섹터·자산군 단위로만.
+- 수치·레벨·조건은 '가정적 예시'가 아닌 기사요약에서 합리적으로 추정되는 범위로.
+- 한국어로 작성.
+"""
+
+# === GPT 호출: JSON 파싱하여 dict 반환 ===
+def gpt_invest_brief_structured(articles):
+    prompt = build_invest_prompt_v2(articles)
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role":"system","content":"사실 기반·보수적 톤의 매크로 전략 브리핑을 만드는 조력자."},
+                {"role":"user","content":prompt}
+            ],
+            temperature=0.2,
+        )
+        raw = resp.choices[0].message.content.strip()
+        try:
+            return json.loads(raw)
+        except Exception:
+            # JSON 파싱 실패 시 원문을 담아 반환
+            return {"raw_text": raw, "disclaimer": "본 내용은 정보 제공 목적이며 투자 판단의 최종 책임은 본인에게 있습니다."}
+    except Exception as e:
+        print(f"[WARN] 투자 브리핑(JSON) 생성 실패: {e}")
+        return {"raw_text": "투자 브리핑 생성 실패", "disclaimer": "본 내용은 정보 제공 목적이며 투자 판단의 최종 책임은 본인에게 있습니다."}
+    
 # ── 메인
 if __name__ == "__main__":
     TARGET = 10
@@ -348,13 +485,17 @@ if __name__ == "__main__":
         # 친절한 레이트 컨트롤(선택)
         time.sleep(0.2)
 
-    # 7) 저장
+        # 7) (변경) 투자 브리핑: 구조화 JSON
+    invest_struct = gpt_invest_brief_structured(results)
+
+    # 8) 저장
     out = {
         "as_of": datetime.now(KST).isoformat(),
         "total_raw": len(raw),
         "total_after_filter": len(base),
         "cluster_count": len(groups),
         "returned": len(results),
+        "invest_structured": invest_struct,   # ★ 추가(구조화)
         "top": results
     }
     text = json.dumps(out, ensure_ascii=False, indent=2)
