@@ -1,0 +1,7 @@
+python-dotenv
+requests
+scikit-learn
+rapidfuzz
+newspaper3k
+openai
+lxml[html_clean]
