@@ -2,7 +2,7 @@ name: Daily Econ News (KST 08:00)
 
 on:
   schedule:
-    - cron: "0 23 * * *"   # 매일 08:00 KST (UTC 23:00)
+    - cron: "0 23 * * *"   # 08:00 KST
   workflow_dispatch: {}
 
 jobs:
@@ -21,10 +21,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show repo tree (debug)
+      - name: Show repo tree
         run: |
           pwd
           ls -al
+
+      - name: Check required env (masked length only)
+        run: |
+          python - << 'PY'
+          import os
+          def ok(k): 
+            v=os.getenv(k); 
+            print(f"{k}:","SET" if v else "MISSING", "(len="+str(len(v))+")" if v else "")
+          for k in ["NAVER_CLIENT_ID","NAVER_CLIENT_SECRET","OPENAI_API_KEY","NOTION_TOKEN","NOTION_PARENT_PAGE_ID"]:
+              ok(k)
+          PY
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -48,18 +59,34 @@ jobs:
           import nltk
           try:
               nltk.download('punkt', quiet=True)
+              print("nltk punkt OK")
           except Exception as e:
-              print("NLTK download warning:", e)
+              print("nltk download warning:", e)
           PY
+          python -c "import sys,platform; print('Python:',sys.version); print('Platform:',platform.platform())"
+          pip freeze | sed -n '1,120p'
 
-      - name: Run pipeline (run.py)
-        run: python run.py
+      - name: Run econ_popular_multi.py (collect+summarize)
+        run: |
+          set -x
+          python -u econ_popular_multi.py
+        # 실패 지점을 보기 위해 여기서는 멈추게 둔다
 
-      - name: Upload artifacts
+      - name: Show JSON head
+        if: ${{ always() }}
+        run: |
+          test -f econ_popular_multi.json && head -n 80 econ_popular_multi.json || echo "NO econ_popular_multi.json"
+
+      - name: Push to Notion
+        if: ${{ always() }}
+        run: |
+          python -u push_notion_daily.py
+
+      - name: Upload artifact
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: econ-popular-output
+          name: outputs
           path: |
             econ_popular_multi.json
-            daily.log
-          if-no-files-found: ignore
+          if-no-files-found: warn
