@@ -2,16 +2,8 @@ name: Daily Econ News (KST 08:00)
 
 on:
   schedule:
-    # GitHub Actions는 UTC 기준. 08:00 KST = 전날 23:00 UTC
-    - cron: "0 23 * * *"
+    - cron: "0 23 * * *"   # 매일 08:00 KST (UTC 23:00)
   workflow_dispatch: {}
-
-permissions:
-  contents: read
-
-concurrency:
-  group: daily-econ-news
-  cancel-in-progress: false
 
 jobs:
   run:
@@ -29,11 +21,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Show repo tree (debug)
+        run: |
+          pwd
+          ls -al
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install system deps (for lxml/newspaper3k)
         run: |
@@ -41,11 +37,13 @@ jobs:
           sudo apt-get install -y libxml2-dev libxslt1-dev zlib1g-dev
 
       - name: Install Python deps
-        run: pip install -r requirements.txt
-
-      # 🔧 여기 수정: 멀티라인 스크립트는 run: | 로 감싼다
-      - name: (Optional) Download NLTK data for newspaper3k
         run: |
+          pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install python-dotenv requests scikit-learn rapidfuzz newspaper3k openai "lxml[html_clean]"
+          fi
           python - << 'PY'
           import nltk
           try:
@@ -54,13 +52,10 @@ jobs:
               print("NLTK download warning:", e)
           PY
 
-      - name: Run pipeline (collect + summarize + invest brief)
-        run: python econ_popular_multi.py
+      - name: Run pipeline (run.py)
+        run: python run.py
 
-      - name: Push to Notion (create daily page)
-        run: python push_notion_daily.py
-
-      - name: Upload artifacts (for debugging/result)
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: econ-popular-output
